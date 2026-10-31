@@ -1,0 +1,12 @@
+ESP32-S3 + ST7735 handheld SDR
+
+This project is intended to be used with / derived from ESP-SDR:
+  https://github.com/ESPARGOS/esp-sdr
+  Copyright (C) ESPARGOS contributors
+  Licensed under GPL-3.0-or-later.
+
+The ST7735 panel driver is provided by the Espressif Component Registry
+component waveshare/esp_lcd_st7735 (MIT).
+
+This project is experimental. The ESP-SDR raw I/Q capture path is
+undocumented and may change; use at your own risk.
