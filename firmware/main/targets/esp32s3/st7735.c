@@ -375,7 +375,10 @@ void st7735_draw_bins(const uint8_t *bins, unsigned n,
         if (hi <= lo) hi = lo + 1;
         unsigned v = 0;
         for (unsigned j = lo; j < hi && j < n; j++) {
-            unsigned code = bins[j];
+            /* spectrum_snapshot() returns natural FFT order: DC at bin 0,
+             * Nyquist at n/2.  Rotate so DC lands in the middle of the
+             * screen, otherwise the wide spans show the Nyquist null. */
+            unsigned code = bins[(j + n / 2) % n];
             if (code > v) v = code;
         }
         vcol[x] = (uint8_t)v;
