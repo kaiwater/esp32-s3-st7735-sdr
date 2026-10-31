@@ -289,6 +289,14 @@ static void tune_by(int delta)
     xSemaphoreGive(s_iq_lock);
 }
 
+/* Match the RX low-pass to the displayed span.  The PHY auto mode is set
+ * for a ~20 MHz Wi-Fi channel, which rolls the edges off at 40/80 MHz. */
+static void apply_span_filter(unsigned rate_code)
+{
+    unsigned span = rate_code == 6 ? 16 : rate_code == 1 ? 40 : 80;
+    rx_filter = span <= 16 ? -1 : (int)rx_bandwidth_dcap(span);
+}
+
 /* Long-press acceleration: 5 MHz, then 10/25/50/100 MHz. */
 static unsigned accel_step(unsigned n)
 {
@@ -308,6 +316,8 @@ static void lcd_task(void *arg)
     bool paused = false, have_frame = false;
     int64_t next_frame = 0;
 
+    apply_span_filter(rate_code);
+
     for (;;) {
         int b = st7735_button();
         bool changed = false, refresh = false;
@@ -321,6 +331,7 @@ static void lcd_task(void *arg)
         case 22: rep2++; tune_by(-(int)accel_step(rep2)); changed = true; break;
         case 3:
             rate_code = rate_code == 6 ? 1 : rate_code == 1 ? 0 : 6;
+            apply_span_filter(rate_code);
             changed = true;
             break;
         case 13:                                                   /* long K3 */
