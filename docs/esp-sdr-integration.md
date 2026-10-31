@@ -64,6 +64,11 @@ S3 的采样率映射（`spectrum.c` 的 `rates[]`）：
 
 S3 使用 `MAX_FFT = 256`，只保留显示需要的分辨率，减少 BSS。
 
+注意 `spectrum_snapshot()` 输出的是**自然 FFT 顺序**：bin 0 是 DC，
+bin n/2 是 Nyquist，后半段是负频率。`st7735_draw_bins()` 在映射到屏幕列
+之前先做 `(j + n/2) % n` 旋转，让 DC 落在屏幕中心；否则宽 span 会把
+Nyquist 的凹陷画在正中间。
+
 ## 3. 内存：RF ring 与 BSS 的冲突
 
 S3 的 RF ring 固定在：
