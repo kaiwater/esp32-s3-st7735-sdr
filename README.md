@@ -10,7 +10,7 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 1 | ST7735 160x128 + 4 按键 bring-up | 代码已写，待实机验证 |
+| 1 | ST7735 160x128 + 4 按键 bring-up | 编译通过（ESP-IDF 5.4.2），待实机验证 |
 | 2 | ESP-SDR S3 接入（raw IQ / FFT） | 设计完成，待实现 |
 | 3 | 频谱 + 瀑布 + 调谐 UI | 待实现 |
 | 4 | 电池/外壳/长期稳定性 | 未开始 |
@@ -95,6 +95,8 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 
 阶段 1 的显示 demo 在 `main/`，使用 Espressif Component Registry 的
 `waveshare/esp_lcd_st7735`。首次构建会自动拉取组件。
+
+已在 **ESP-IDF v5.4.2 / esp32s3** 上编译通过（2026-10-31），但还没在硬件上跑屏。
 
 完整 SDR 接入步骤见 [`docs/esp-sdr-integration.md`](docs/esp-sdr-integration.md)。
 
