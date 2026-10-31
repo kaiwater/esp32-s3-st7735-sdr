@@ -389,7 +389,9 @@ void ring_capture_init(void) {
     dsp_ready = dsp_ready && twiddles &&
                 dsps_fft2r_init_sc16(twiddles, RING_SPEC_NFFT_MAX) == ESP_OK;
     log_tables_init();
-    if (dsp_ready) c1_start();
+    /* Standalone display build: keep core 1 idle; the snapshot path only
+     * uses core 0, and the ring worker can disturb SPI/DMA and RF state. */
+    /* if (dsp_ready) c1_start(); */
 #else
     dsp_ready = spectrum_fft_init();
     log_tables_init();

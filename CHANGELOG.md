@@ -7,9 +7,10 @@
 - `firmware/`：完整 ESP-SDR fork，内置 esp-dsp 和 esp_lcd_st7735
 - `acquire_iq()` + `spectrum_snapshot()`：256-bin 片内 FFT
 - ST7735 条带渲染（2.5KB），解决 40KB 帧缓冲分配失败
+- 上电先按住屏幕，RF 稳定后再初始化，避免白屏/花屏
 - 解决 `S3 RF ring overlaps BSS` 链接错误
 - IDF 5.4.2 兼容 shim
-- 新 UI：大号频率、实心频谱、magma 瀑布
+- 新 UI：CRT 荧光绿、大号频率、实心频谱、单色绿瀑布
 - K1/K2 调谐、K3 span、K4 暂停
 - `bringup/`：阶段 1 demo 独立子目录
 

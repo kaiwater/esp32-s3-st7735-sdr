@@ -47,9 +47,9 @@ idf.py -B build-s3 -p /dev/cu.usbserial-XXXX flash
 
 ## UI
 
-- 顶部：大号中心频率 + `MHz` + `SPAN`
-- 中部：256-bin 实心频谱（深青填充 + 亮边），3 条竖向刻度
-- 底部：magma 色带瀑布（28 行）
+- 顶部：大号中心频率 + `MHz` + `SPAN`，纯黑 CRT 风格
+- 中部：256-bin 实心频谱（暗绿余辉 + 荧光绿亮边），8 格示波器刻度
+- 底部：单色绿余辉瀑布（28 行）
 - 暂停时状态行显示 `PAUSED  K4 RESUME`
 
 实现细节见根目录 [`docs/esp-sdr-integration.md`](../docs/esp-sdr-integration.md)。

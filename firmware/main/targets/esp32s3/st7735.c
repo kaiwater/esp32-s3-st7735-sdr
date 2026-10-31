@@ -48,15 +48,17 @@
 #define PIN_BTN_OK 6
 #define PIN_BTN_BACK 14
 
-/* Dark, low-glare theme: near-black background, mint spectrum, magma falls. */
+/* 1970s/80s CRT oscilloscope: pure black, phosphor green, dim graticule. */
 #define RGB565(r, g, b) ((uint16_t)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3)))
-#define COL_BG     RGB565(0x0A, 0x0E, 0x14)
-#define COL_TEXT   RGB565(0xE8, 0xF6, 0xF3)
-#define COL_ACCENT RGB565(0x4F, 0xE3, 0xD0)
-#define COL_DIM    RGB565(0x5A, 0x7A, 0x80)
-#define COL_GRID   RGB565(0x17, 0x31, 0x3A)
-#define COL_FILL   RGB565(0x0B, 0x5E, 0x57)
-#define COL_EDGE   RGB565(0x5F, 0xFF, 0xE8)
+#define COL_BG     RGB565(0x00, 0x00, 0x00)
+#define COL_TEXT   RGB565(0xCC, 0xFF, 0xDD)  /* bloomed phosphor */
+#define COL_ACCENT RGB565(0x33, 0xFF, 0x66)  /* bright P1 green */
+#define COL_DIM    RGB565(0x1E, 0x8A, 0x46)
+#define COL_GRID   RGB565(0x0E, 0x40, 0x22)
+#define COL_CENTER RGB565(0x55, 0xFF, 0x88)
+#define COL_EDGE   COL_ACCENT
+#define GLOW_TOP   RGB565(0x0E, 0x5A, 0x2E)
+#define GLOW_BOT   RGB565(0x03, 0x14, 0x09)
 
 #define SPEC_TOP 27
 #define SPEC_BOTTOM 92
@@ -72,6 +74,7 @@ static uint16_t *s_strip;
 static int s_strip_y;
 static uint8_t s_wf[WF_ROWS][WIDTH];
 static uint16_t s_heat[256];
+static uint16_t s_glow[SPEC_BOTTOM - SPEC_TOP + 1];
 
 /* 8x8 font, public domain (font8x8 / VGA-derived). Uppercase and digits. */
 static const uint8_t s_font8[64][8] = {
@@ -234,19 +237,24 @@ static uint16_t ramp(const ramp_stop_t *stop, int n, unsigned v)
     return stop[n - 1].color;
 }
 
-static void build_waterfall_palette(void)
+static void build_palettes(void)
 {
-    /* Magma: near-black -> deep purple -> magenta -> orange -> pale yellow. */
+    /* Monochrome phosphor persistence: black -> green -> near white. */
     const ramp_stop_t heat[] = {
         {0, COL_BG},
-        {36, RGB565(0x1A, 0x0B, 0x2E)},
-        {90, RGB565(0x4B, 0x1D, 0x6B)},
-        {140, RGB565(0x9C, 0x2F, 0x63)},
-        {190, RGB565(0xE0, 0x60, 0x2C)},
-        {232, RGB565(0xF7, 0xC5, 0x48)},
-        {255, RGB565(0xFF, 0xF4, 0xD6)},
+        {40, RGB565(0x00, 0x08, 0x03)},
+        {90, RGB565(0x06, 0x3A, 0x1E)},
+        {140, RGB565(0x0A, 0x7A, 0x3A)},
+        {190, RGB565(0x18, 0xC8, 0x5A)},
+        {232, RGB565(0x5C, 0xFF, 0x8E)},
+        {255, RGB565(0xD8, 0xFF, 0xE6)},
     };
     for (unsigned v = 0; v < 256; v++) s_heat[v] = ramp(heat, 7, v);
+
+    /* Glow under the trace: brighter near the top, fading to black. */
+    const unsigned range = SPEC_BOTTOM - SPEC_TOP;
+    for (unsigned y = 0; y <= range; y++)
+        s_glow[y] = mix565(GLOW_BOT, GLOW_TOP, range - y, range);
 }
 
 static void clear_strip(void)
@@ -264,6 +272,26 @@ static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_d
     BaseType_t hp = pdFALSE;
     xSemaphoreGiveFromISR(s_flush_done, &hp);
     return hp == pdTRUE;
+}
+
+/* Keep the panel in reset with the backlight off while WiFi/PHY boot.
+ * This avoids the power-on noise and the white flash when the 3.3V rail
+ * sags during RF startup. */
+void st7735_hold(void)
+{
+    const gpio_config_t rst = {
+        .pin_bit_mask = 1ULL << PIN_RST,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&rst);
+    gpio_set_level(PIN_RST, 0);
+
+    const gpio_config_t bl = {
+        .pin_bit_mask = 1ULL << PIN_BL,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&bl);
+    gpio_set_level(PIN_BL, 0);
 }
 
 void st7735_init(void)
@@ -322,7 +350,7 @@ void st7735_init(void)
     }
     memset(s_strip, 0, STRIP_PIXELS * sizeof(uint16_t));
     memset(s_wf, 0, sizeof(s_wf));
-    build_waterfall_palette();
+    build_palettes();
 
     const gpio_config_t btn = {
         .pin_bit_mask = (1ULL << PIN_BTN_UP) | (1ULL << PIN_BTN_DOWN) |
@@ -382,13 +410,20 @@ void st7735_draw_bins(const uint8_t *bins, unsigned n,
                 int h = (int)vcol[x] * range / 255;
                 int ytop = SPEC_BOTTOM - h + 1;
                 if (h > 0) {
-                    for (int y = ytop; y <= SPEC_BOTTOM; y++) px(x, y, COL_FILL);
+                    for (int y = ytop; y <= SPEC_BOTTOM; y++) px(x, y, s_glow[y - SPEC_TOP]);
                     px(x, ytop, COL_EDGE);
                     if (ytop + 1 <= SPEC_BOTTOM) px(x, ytop + 1, COL_EDGE);
                 }
             }
-            for (int gx = 40; gx < WIDTH; gx += 40)
-                for (int y = SPEC_TOP; y <= SPEC_BOTTOM; y++) px(gx, y, COL_GRID);
+            /* Oscilloscope graticule: 8 vertical divisions, 4 horizontal. */
+            for (int gx = 20; gx < WIDTH; gx += 20) {
+                uint16_t col = gx == 80 ? COL_CENTER : COL_GRID;
+                for (int y = SPEC_TOP; y <= SPEC_BOTTOM; y++) px(gx, y, col);
+            }
+            for (int gy = SPEC_TOP + 16; gy < SPEC_BOTTOM; gy += 16)
+                for (int x = 0; x < WIDTH; x++) px(x, gy, COL_GRID);
+            /* Centre-frequency tick on the baseline. */
+            px(80, SPEC_BOTTOM, COL_CENTER);
         }
 
         if (y0 + STRIP_H > SPEC_BOTTOM + 1 && y0 <= SPEC_BOTTOM + 1)

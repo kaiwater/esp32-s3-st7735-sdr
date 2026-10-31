@@ -616,6 +616,12 @@ static void handle_command(char *line) {
 
 void app_main(void) {
     esp_log_level_set("*", ESP_LOG_NONE);
+
+    /* Hold the panel in reset with the backlight off while WiFi/PHY boot.
+     * Initialising it early makes it flash, then the RF current spike can
+     * reset the panel to a white screen. */
+    st7735_hold();
+
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -642,7 +648,14 @@ void app_main(void) {
     ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
     burst_serial_init();
     ring_capture_init();
+    /* Let the 3.3V rail recover from the RF power-up before the panel is
+     * released from reset and the backlight is enabled. */
+    vTaskDelay(pdMS_TO_TICKS(250));
     st7735_init();
+    {
+        static uint8_t splash[256];
+        st7735_draw_bins(splash, 256, frequency_mhz, 16, "BOOTING ESP-SDR");
+    }
     xTaskCreatePinnedToCore(lcd_task, "lcd", 8192, NULL, 1, NULL, 0);
     burst_serial_serve(handle_command);
 }
