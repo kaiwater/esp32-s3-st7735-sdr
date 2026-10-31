@@ -1,7 +1,7 @@
 # ESP32-S3 + ST7735 手持 SDR
 
 把 ESP32-S3 的 WiFi 射频变成一台**不依赖电脑**的手持 SDR：
-原始 I/Q / 片内 FFT → ST7735 160x128 频谱 + 瀑布。
+原始 I/Q → 片内 FFT → ST7735 160x128 实时频谱 + 瀑布。
 
 > 这是一个独立项目，和 RID 扫描器分开。跑 SDR 时不能同时做 Remote ID 扫描，
 > 因为两者都要占用同一个 WiFi 射频。
@@ -11,26 +11,68 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 1 | ST7735 160x128 + 4 按键 bring-up | 已实机验证：屏幕无偏移/变形，K1~K4 全部正常 |
-| 2 | ESP-SDR S3 接入（raw IQ / FFT） | 设计完成，待实现 |
-| 3 | 频谱 + 瀑布 + 调谐 UI | 待实现 |
-| 4 | 电池/外壳/长期稳定性 | 未开始 |
+| 2 | ESP-SDR S3 接入（raw IQ / 片内 FFT） | 已实机验证：256-bin 频谱连续刷新 |
+| 3 | 频谱 + 瀑布 + 调谐 UI | 已实机验证：调谐、span、暂停均正常 |
+| 4 | 电池 / 外壳 / 长期稳定性 | 未开始 |
 
-**目前不是一台能直接用的 SDR。** 这个仓库先解决屏幕、按键、
-硬件接线和 ESP-SDR 的接入方案；后续按 `docs/esp-sdr-integration.md` 推进。
+**现在是一台能独立工作的 SDR**，不接电脑即可显示实时频谱和瀑布。
+阶段 4（电池、外壳、长时间稳定性）还没做。
 
-## 为什么不用电脑
+## 功能与操作
 
-ESP-SDR 上游把 I/Q 或频谱通过 USB/UART 送到电脑，用浏览器看。
-ESP32-S3 本身支持片内 FFT（256~2048 bin），所以可以把 FFT 结果直接画到
-ST7735 上，不需要电脑。
+- 默认中心频率 **2412 MHz**，范围 100–6000 MHz
+- **K1 / K2**：中心频率 ±5 MHz
+- **K3**：切换 span **16 / 40 / 80 MHz**（对应 16 / 40 / 80 MS/s）
+- **K4**：暂停 / 继续；暂停时状态行显示 `PAUSED  K4 RESUME`
+- 256-bin 片内 FFT，160x128 屏，28 行瀑布
+- 深色 UI：大号频率读数、实心频谱 + 亮边、magma 瀑布
 
-上游没有板载屏支持，但这不是硬件限制：
+## 目录
 
-- 上游 issue #7 就是在要“ESP32 自己显示瀑布图”：
-  https://github.com/ESPARGOS/esp-sdr/issues/7
-- 社区已经有人在 **ESP32-S2 TFT Feather + ST7789** 上做出来了：
-  https://github.com/Kelsidavis/esp-sdr-s2-range
-- S3 比 S2 强，ST7735 只是普通 SPI 屏，完全带得动。
+```
+firmware/   完整固件：ESP-SDR fork + S3 独立显示 UI
+bringup/    阶段 1 的屏幕/按键 bring-up demo（可单独编译）
+docs/       硬件接线、固件实现说明
+changelogs/ 版本记录
+```
+
+`firmware/` 里已经包含：
+
+- ESP-SDR（S3 raw I/Q / 片内 FFT）源码
+- 内置 `esp-dsp`（无需联网拉取）
+- 内置 `waveshare/esp_lcd_st7735` 组件
+
+## 构建固件
+
+需要 **ESP-IDF v5.4.2**（更新版本可能也能编，但只验证了 5.4.2）：
+
+```bash
+cd firmware
+idf.py -B build-s3 -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG=build-s3/sdkconfig \
+  -DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3 build
+idf.py -B build-s3 -p /dev/cu.usbserial-XXXX flash
+```
+
+说明：
+
+- 组件管理器在上游固件里是关闭的，依赖全部在 `firmware/components/` 内，编译不需要联网。
+- 应用日志默认走 UART0（2 Mbaud），不是 USB-Serial-JTAG；`idf.py monitor`
+  默认连 USB 口时可能看不到应用日志，但不影响屏幕和射频。
+- 如果换 ESP-IDF 版本后编译报错，先看 `firmware/docs/` 和根目录
+  [`docs/esp-sdr-integration.md`](docs/esp-sdr-integration.md) 里的兼容性说明。
+
+## 构建阶段 1 demo
+
+```bash
+cd bringup
+idf.py set-target esp32s3
+idf.py build
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+这个 demo 只画颜色条/渐变/按键状态，用来验证屏幕方向和接线。
+首次构建会从 Espressif Component Registry 拉取 `waveshare/esp_lcd_st7735`。
 
 ## 支持的硬件
 
@@ -38,7 +80,6 @@ ST7735 上，不需要电脑。
 - **屏幕**：ST7735S 1.8" 128x160 SPI，8 针，3.3V
 - **按键**：4 个独立轻触按键，K1~K4
 - **供电**：USB 5V；屏幕逻辑 3.3V
-- 没有 PSRAM 也能做：帧缓冲 160x128x16 = 40KB，使用内部 RAM
 
 ### 接线
 
@@ -72,43 +113,32 @@ ST7735 上，不需要电脑。
 ESP32-S3 WiFi RX
    ↓ 未公开 raw I/Q bypass（ESP-SDR）
 IQ10 samples (I[9:0], Q[19:10])
-   ↓ spectrum_snapshot() / 片内 FFT
+   ↓ spectrum_snapshot() / 片内 256-bin FFT
 256 bins (8-bit relative power)
-   ↓
-ST7735 160x128：频谱条 + 瀑布 + 频率/span/状态
+   ↓ 条带渲染（8 行，2.5KB DMA 缓冲）
+ST7735 160x128：大号频率 + 频谱 + 瀑布
 ```
 
 - 基座：ESP-SDR（GPL-3.0），S3 支持 raw IQ 和片内 FFT
 - 显示：ST7735，SPI2/FSPI，160x128，16 位色
-- 按键：K1/K2 调中心频率，K3 切 span/模式，K4 返回/扫描
-- 不依赖电脑；可选保留 UART 日志
+- 按键：K1/K2 调中心频率，K3 切 span，K4 暂停
+- 不依赖电脑；保留 UART0 调试/命令通道
 
-## 构建
+### 为什么不用 40KB 全屏帧缓冲
 
-这是 ESP-IDF 项目，不是 Arduino/PlatformIO：
-
-```bash
-idf.py set-target esp32s3
-idf.py build
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-```
-
-阶段 1 的显示 demo 在 `main/`，使用 Espressif Component Registry 的
-`waveshare/esp_lcd_st7735`。首次构建会自动拉取组件。
-
-已在 **ESP-IDF v5.4.2 / esp32s3** 上编译并实机验证（2026-10-31）：
-160x128 显示正常，无偏移/变形，K1~K4 全部可用。
-
-完整 SDR 接入步骤见 [`docs/esp-sdr-integration.md`](docs/esp-sdr-integration.md)。
+WiFi/PHY 启动后，S3 内部 DMA 内存只剩约 24KB，最大连续块约 15KB，
+40KB 全屏缓冲会直接分配失败。固件改成 **8 行条带缓冲（160x8x2 = 2.5KB）**，
+每帧分 16 次刷屏；同时把 ESP-SDR ring 的大块 BSS 改成堆分配，
+避免 RF ring（`0x3fcb0000`）和 BSS 重叠导致链接失败。
 
 ## 已知限制
 
 - 上游 ESP-SDR 的 raw I/Q 机制是**未公开**的，部分代码由 AI 生成；
 - S3 只能覆盖 2.4GHz 附近；5GHz 需要 ESP32-C5；
-- 快照之间有 gaps；continuous 模式也只分析一部分信号；
-- 增益/功率未校准，显示的是相对强度，不是校准 dBm；
+- 快照之间有 gaps；显示的是相对强度，不是校准 dBm；
+- 没有 PSRAM：瀑布 28 行，频谱 256 bin；
 - 跑 SDR 时不能同时做 RID 扫描；
-- 没有 PSRAM，瀑布/帧缓冲要省着用；
+- 长时间稳定性、电池和外壳还没验证；
 - 本项目是 GPL-3.0，和 Apache-2.0 的 RID 扫描器分开维护。
 
 ## 参考
@@ -118,12 +148,4 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 - 板载显示 issue：https://github.com/ESPARGOS/esp-sdr/issues/7
 - S2 TFT Feather 显示 fork：https://github.com/Kelsidavis/esp-sdr-s2-range
 - esp_lcd_st7735 组件：https://components.espressif.com/components/waveshare/esp_lcd_st7735
-- 上游 commit 参考：`25fe69f946311abdaf9ad56591f25fedbc20ac98`
-
-## License
-
-GPL-3.0-or-later。基于 ESP-SDR 的设计与代码，见 `LICENSE` 和 `NOTICE`。
-
-## Changelog
-
-版本与阶段记录见 [`CHANGELOG.md`](CHANGELOG.md) 和 [`changelogs/`](changelogs/)。
+- 8x8 像素字体：font8x8（public domain）

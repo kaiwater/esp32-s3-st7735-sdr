@@ -1,12 +1,25 @@
 ESP32-S3 + ST7735 handheld SDR
 
-This project is intended to be used with / derived from ESP-SDR:
+This project is a fork of ESP-SDR:
   https://github.com/ESPARGOS/esp-sdr
   Copyright (C) ESPARGOS contributors
   Licensed under GPL-3.0-or-later.
+The full license text is in LICENSE.
 
-The ST7735 panel driver is provided by the Espressif Component Registry
-component waveshare/esp_lcd_st7735 (MIT).
+Bundled third-party components:
+
+  components/esp-dsp/
+    Espressif DSP library
+    Copyright (C) Espressif Systems
+    Licensed under Apache-2.0 (see components/esp-dsp/LICENSE).
+
+  components/esp_lcd_st7735/
+    Waveshare ESP-LCD ST7735 component
+    Licensed under MIT (see components/esp_lcd_st7735/idf_component.yml).
+
+  8x8 pixel font in main/targets/esp32s3/st7735.c
+    Derived from font8x8 (public domain, VGA-derived).
+    https://github.com/dhepper/font8x8
 
 This project is experimental. The ESP-SDR raw I/Q capture path is
 undocumented and may change; use at your own risk.

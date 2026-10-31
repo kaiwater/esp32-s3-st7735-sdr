@@ -1,0 +1,238 @@
+/* ESP32-C2 burst SDR over UART0. */
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include "esp_event.h"
+#include "esp_cpu.h"
+#include "esp_rom_sys.h"
+#include "esp_log.h"
+#include "esp_rom_crc.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "heap_memory_layout.h"
+#include "nvs_flash.h"
+#include "soc/soc.h"
+
+#include "burst_serial.h"
+#include "burst_gpio.h"
+#include "burst_version.h"
+#include "spectrum.h"
+#include "rx_recalibration.h"
+#include "rx_tuning.h"
+#include "rx_lo.h"
+
+/* Pinned C2 librftest adctrig uses 32 KiB at 0x3fcc0000 and
+ * SRAM usage 2 in SENSITIVE 0x600c1018. heap_guard.c also excludes the
+ * rest of this 128 KiB bank: CPU/DMA traffic there corrupts RF dumps
+ * and unrelated memory. Only quiescent FFT storage lives above the buffer. */
+SOC_RESERVE_MEMORY_REGION(0x3fcc0000, 0x3fcc8000, c2_rf_dump);
+#define IQ_WORDS       8190u
+#define IQ_BUFFER      ((uint32_t *)0x3fcc0000)
+#define SRAM_OWNER_REG 0x600c1018u
+extern void stop_tx_tone(unsigned);
+extern void rom_pbus_workmode(void);
+extern void rom_pbus_xpd_rx_on(unsigned);
+extern void rom_pbus_xpd_tx_off(void);
+extern void set_rxclk_en(unsigned);
+extern void set_chanfreq(unsigned, unsigned);
+extern void phy_set_freq(unsigned, int);
+extern unsigned rom_chip_i2c_readReg(unsigned, unsigned, unsigned);
+extern void rom_chip_i2c_writeReg(unsigned, unsigned, unsigned, unsigned);
+static int rx_filter = -1;
+static unsigned rx_filter_saved[2];
+/* BBTOP I/Q CBW20 capacitor codes. Preserve calibration and upper bits. */
+static void rx_filter_apply(void) {
+    for (unsigned j = 0; j < 2; j++) {
+        rx_filter_saved[j] = rom_chip_i2c_readReg(0x67, 1, 4 + j);
+        if (rx_filter >= 0)
+            rom_chip_i2c_writeReg(0x67, 1, 4 + j, (rx_filter_saved[j] & ~63u) | (unsigned)rx_filter);
+    }
+}
+static void rx_filter_restore(void) {
+    if (rx_filter >= 0)
+        for (unsigned j = 0; j < 2; j++) rom_chip_i2c_writeReg(0x67, 1, 4 + j, rx_filter_saved[j]);
+}
+static unsigned frequency_mhz = 2412;
+static bool rx_ready;
+#define C2_FREQ_MIN RX_FREQ_MIN
+#define C2_FREQ_MAX RX_FREQ_MAX
+static bool frequency_valid(unsigned mhz) {
+    return mhz >= C2_FREQ_MIN && mhz <= C2_FREQ_MAX;
+}
+static void tune_rx(unsigned mhz) {
+    static unsigned calibrated_mhz;
+    if (calibrated_mhz != mhz || rx_recalibration_stale()) {
+        rx_recalibrate(mhz);
+        calibrated_mhz = mhz;
+    }
+    bool channel = (mhz >= 2412 && mhz <= 2472 && (mhz - 2412) % 5 == 0) || mhz == 2484;
+    /* Calibrate using a real Wi-Fi channel, then program exact PLL MHz.
+     * The channel API otherwise rounds off-grid frequencies. This is an
+     * attempt range; PLL lock and reception are not guaranteed throughout. */
+    rx_lo_plan_t plan = rx_lo_plan(mhz);
+    rx_lo_select(false);
+    set_chanfreq(channel ? mhz : 2412, 0);
+    if (!channel) phy_set_freq(plan.mhz, plan.offset_khz);
+}
+#define send_bytes burst_serial_send
+static void reply(const char *s) {
+    (void)send_bytes(s, strlen(s));
+}
+#include "burst_gain.h"
+#include "burst_limits.h"
+
+static void prepare_rx(void) {
+    if (rx_ready && !rx_recalibration_stale()) return;
+    tune_rx(frequency_mhz);
+    stop_tx_tone(1);
+    rom_pbus_workmode();
+    rom_pbus_xpd_tx_off();
+    rom_pbus_xpd_rx_on(1);
+    set_rxclk_en(1);
+    gain_apply();
+    rx_lo_select(rx_lo_plan(frequency_mhz).alternate);
+    esp_rom_delay_us(3000);
+    rx_ready = true;
+}
+
+#include "burst_capture.h"
+static portMUX_TYPE capture_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
+    if (divider != 0 && divider != 1 && divider != 6) {
+        reply("ERR rate\n");
+        return false;
+    }
+    prepare_rx();
+
+    for (unsigned j = 0; j < n; j++) IQ_BUFFER[j] = 0xa5a0055au;
+    rx_filter_apply();
+    /* Prevent task/interrupt interleaving during the bank handoff and
+     * bounded snapshot (at most about 512 us at 16 MS/s). */
+    taskENTER_CRITICAL(&capture_mux);
+    uint32_t owner = REG_READ(SRAM_OWNER_REG);
+    uint32_t clock = REG_READ(0x60026014);
+    uint32_t trigger = REG_READ(0x600460b4);
+    uint32_t dump_mode = REG_READ(0x6004bc08);
+    uint32_t lanes = REG_READ(0x6004bc14);
+    REG_WRITE(0x60026014, clock | (1u << 29));
+    REG_WRITE(0x600460b4, trigger & ~1u);
+    REG_WRITE(0x6004bc08, dump_mode | (15u << 15));
+    unsigned ticks_per_us = esp_rom_get_cpu_ticks_per_us();
+    uint32_t start = esp_cpu_get_cycle_count();
+    REG_WRITE(0x6004bc04, 0);
+    REG_WRITE(0x6004bc14, (1u << 6) | (2u << 12) | (3u << 18));
+    REG_WRITE(SRAM_OWNER_REG, (owner & ~7u) | 2u);
+    __asm__ volatile("fence rw,rw" ::: "memory");
+    unsigned dump_clock = divider == 6 ? 2 : divider;
+    uint32_t ctrl = 0x80000000u | (dump_clock << 15) | n;
+    REG_WRITE(0x6004bc04, ctrl);
+    REG_WRITE(0x6004bc04, ctrl | (1u << 19));
+    REG_WRITE(0x6004bc04, ctrl);
+    while (!(REG_READ(0x6004bc04) & (1u << 18)) &&
+           (uint32_t)(esp_cpu_get_cycle_count() - start) < 20000u * ticks_per_us) {}
+    bool done = (REG_READ(0x6004bc04) & (1u << 18)) != 0;
+    uint32_t elapsed = (esp_cpu_get_cycle_count() - start) / ticks_per_us;
+    /* Disable before changing the dump-clock selection, as in vendor adctrig. */
+    REG_WRITE(0x6004bc04, ctrl & ~0x80000000u);
+    uint32_t stopped = esp_cpu_get_cycle_count();
+    while ((uint32_t)(esp_cpu_get_cycle_count() - stopped) < 5u * ticks_per_us) {}
+    __asm__ volatile("fence rw,rw" ::: "memory");
+    REG_WRITE(SRAM_OWNER_REG, owner);
+    REG_WRITE(0x6004bc14, lanes);
+    REG_WRITE(0x6004bc08, dump_mode);
+    REG_WRITE(0x600460b4, trigger);
+    REG_WRITE(0x60026014, clock);
+    __asm__ volatile("fence rw,rw" ::: "memory");
+    taskEXIT_CRITICAL(&capture_mux);
+    rx_filter_restore();
+    if (!done) {
+        reply("ERR capture_timeout\n");
+        return false;
+    }
+    for (unsigned j = 0; j < n; j++) {
+        if (IQ_BUFFER[j] == 0xa5a0055au) {
+            reply("ERR capture_incomplete\n");
+            return false;
+        }
+    }
+    *capture_us = elapsed;
+    return true;
+}
+
+static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, unsigned *elapsed) {
+    bool ok = acquire_iq(n, rate, elapsed);
+    *data = IQ_BUFFER;
+    return ok;
+}
+
+static bool capture(unsigned n, unsigned divider, unsigned format) {
+    unsigned elapsed;
+    if (!acquire_iq(n, divider, &elapsed)) return false;
+    return burst_send_capture(n, format, elapsed);
+}
+
+#define BURST_ID       "C2SDR"
+#define BURST_MAX_RATE 6
+#include "burst_commands.h"
+
+static void handle_command(char *line) {
+    if (burst_version_command(line)) return;
+    if (burst_gpio_command(line)) return;
+    if (spectrum_command(line, frequency_mhz, spectrum_acquire)) return;
+    if (limits_command(line)) return;
+    if (gain_command(line)) return;
+    if (burst_common_command(line)) return;
+    unsigned n;
+    char extra;
+    if (!strcmp(line, "CAPS")) {
+        reply("CAPS VERSION GPIO SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS SERIALLEASE "
+              "TUNEEXT LPFANA RX40 RX16 GAIN HWAGC IQ8\n");
+    } else if (sscanf(line, "BANDWIDTH %u %c", &n, &extra) == 1 &&
+               (!n || (n >= RX_BANDWIDTH_MIN && n <= RX_BANDWIDTH_MAX))) {
+        rx_filter = rx_bandwidth_dcap(n);
+        reply("OK\n");
+    } else if (!strcmp(line, "LPF AUTO")) {
+        rx_filter = -1;
+        reply("OK\n");
+    } else if (sscanf(line, "LPF %u %c", &n, &extra) == 1 && n <= 63) {
+        rx_filter = n;
+        reply("OK\n");
+    } else if (!strcmp(line, "LPF?")) {
+        char answer[80];
+        snprintf(answer, sizeof(answer), "LPF %d %u %u\n", rx_filter, rom_chip_i2c_readReg(0x67, 1, 4) & 63,
+                 rom_chip_i2c_readReg(0x67, 1, 5) & 63);
+        reply(answer);
+    } else
+        reply("ERR command\n");
+}
+
+void app_main(void) {
+    esp_log_level_set("*", ESP_LOG_NONE);
+    esp_err_t e = nvs_flash_init();
+    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        e = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(e);
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    /* SDR does not queue packets; keep Wi-Fi allocations in the lower banks. */
+    cfg.static_rx_buf_num = 2;
+    cfg.dynamic_rx_buf_num = 4;
+    cfg.static_tx_buf_num = 2;
+    cfg.dynamic_tx_buf_num = 2;
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
+    prepare_rx();
+    esp_log_level_set("*", ESP_LOG_NONE);
+    burst_serial_init();
+    burst_serial_serve(handle_command);
+}

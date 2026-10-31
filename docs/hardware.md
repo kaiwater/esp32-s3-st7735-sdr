@@ -33,8 +33,8 @@
 |---|---|---|---|
 | K1 | UP / 频率 + | GPIO4 | J1-4 |
 | K2 | DOWN / 频率 - | GPIO5 | J1-5 |
-| K3 | OK / 模式 | GPIO6 | J1-6 |
-| K4 | BACK / 扫描 | GPIO14 | J1-20 |
+| K3 | OK / span 切换 | GPIO6 | J1-6 |
+| K4 | BACK / 暂停 | GPIO14 | J1-20 |
 | 公共端 | GND | GND | J1-22 |
 
 按键一端接 GPIO，一端接 GND；GPIO 开内部上拉，按下为低。
@@ -57,7 +57,7 @@ UART0 GPIO43/44、原生 USB GPIO19/20 不冲突。
 
 ## 屏幕方向
 
-阶段 1 的 demo 默认横屏 160x128：
+固件和阶段 1 demo 都使用横屏 160x128：
 
 - `esp_lcd_panel_swap_xy(panel, true)`
 - `esp_lcd_panel_mirror(panel, true, false)`

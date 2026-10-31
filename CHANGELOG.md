@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.0 — 2026-10-31
+
+阶段 2/3 完成：ESP-SDR S3 接入、实时频谱/瀑布、调谐 UI，全部实机验证。
+
+- `firmware/`：完整 ESP-SDR fork，内置 esp-dsp 和 esp_lcd_st7735
+- `acquire_iq()` + `spectrum_snapshot()`：256-bin 片内 FFT
+- ST7735 条带渲染（2.5KB），解决 40KB 帧缓冲分配失败
+- 解决 `S3 RF ring overlaps BSS` 链接错误
+- IDF 5.4.2 兼容 shim
+- 新 UI：大号频率、实心频谱、magma 瀑布
+- K1/K2 调谐、K3 span、K4 暂停
+- `bringup/`：阶段 1 demo 独立子目录
+
+详细记录：[`changelogs/2026-10-31-v0.2.0.md`](changelogs/2026-10-31-v0.2.0.md)
+
 ## v0.1.0 — 2026-10-31
 
 项目立项与阶段 1 脚手架。

@@ -1,271 +1,222 @@
-# ESP-SDR S3 接入方案
+# ESP-SDR S3 独立显示实现记录
 
-目标：在 ESP32-S3 上用 ESP-SDR 的 raw I/Q / 片内 FFT，把 256 bin 频谱直接画到
+目标：在 ESP32-S3 上用 ESP-SDR 的 raw I/Q + 片内 FFT，把 256-bin 频谱直接画到
 ST7735 160x128，不依赖电脑。
+
+本文记录**已经实现并实机验证**的方案，不再是待办设计稿。
 
 ## 基座
 
-- 上游：https://github.com/ESPARGOS/esp-sdr
-- 参考 commit：`25fe69f946311abdaf9ad56591f25fedbc20ac98`
+- 上游：<https://github.com/ESPARGOS/esp-sdr>
+- 基线 commit：`9b61e7465bee6da15209c5c09308043d08c46a1d`
 - License：GPL-3.0-or-later
-- S3 相关代码：
-  - `main/targets/esp32s3/receiver.c`
-  - `main/common/spectrum.c`（上游默认不编进 S3）
-  - `main/common/burst_serial.c`
-  - `main/targets/esp32s3/s3_unpack.S` / `s3_fft_rnd.S`
+- 固件目录：[`../firmware`](../firmware)
+- 已验证 IDF：**v5.4.2**
 
-## 1. 把 S3 的 capture 拆成“只采集”和“发送”
+## 改动的文件
 
-现在 `receiver.c` 里的 `capture()` 一边采集一边通过 `burst_send_capture()` 发给主机。
-显示需要“只采集、拿 IQ 指针”，所以拆开：
+| 文件 | 作用 |
+|---|---|
+| `main/targets/esp32s3/st7735.c/.h` | ST7735 初始化、条带渲染、UI、按键 |
+| `main/targets/esp32s3/receiver.c` | `acquire_iq()`、`s3_spectrum_acquire()`、`lcd_task()`、调谐 |
+| `main/common/spectrum.c/.h` | `spectrum_snapshot()`、S3 采样率、S3 `MAX_FFT=256` |
+| `main/common/ring_capture.c` | IDF 5.4 兼容 shim；S3 大块缓冲改堆分配 |
+| `main/CMakeLists.txt` | 加入 `spectrum.c` / `st7735.c` 和显示依赖 |
+| `components/esp_lcd_st7735/` | 内置 Waveshare ST7735 组件（MIT） |
+| `components/esp-dsp/` | 内置 esp-dsp（Apache-2.0），不用子模块 |
 
-```c
-/* 只采集，不发送。成功时 IQ_BUFFER 里是 IQ10:
- * I 在 bits 0..9，Q 在 bits 10..19。 */
-static bool acquire_iq(unsigned n, unsigned divider, unsigned *elapsed)
-{
-    if (divider != 0 && divider != 1 && divider != 6) return false;
+## 1. 只采集、不发送
 
-    prepare_rx();
-    for (unsigned j = 0; j < n; j++) IQ_BUFFER[j] = 0xa5a0055au;
+上游 `receiver.c` 的 `capture()` 会一边采集一边通过 `burst_send_capture()` 发给主机。
+显示路径需要“只采集、拿 IQ 指针”，因此新增 `acquire_iq()`：
 
-    rx_filter_apply();
-    uint32_t owner = REG_READ(SRAM_OWNER_REG);
-    int64_t start = esp_timer_get_time();
+- 与 `capture()` 相同的寄存器序列；
+- 成功后 `IQ_BUFFER` 里是 IQ10：`I` 在 bits 0..9，`Q` 在 bits 10..19；
+- 用 `0xa5a0055a` 哨兵检测采集超时；
+- 用 `s_iq_lock` 互斥锁保护 `prepare_rx()` / 调谐 / 采集。
 
-    /* 与上游 capture() 相同的寄存器序列 */
-    REG_WRITE(0x60033d5c, 0);
-    REG_WRITE(0x60033d90, rx_pack | ((rx_pack + 1) << 6) |
-                          ((rx_pack + 2) << 12) | ((rx_pack + 3) << 18) |
-                          (rx_agc << 24));
-    REG_WRITE(SRAM_OWNER_REG, (owner & ~15u) | 4u);
+`capture()` 保留原样给串口主机使用。
 
-    uint32_t rate_bits = divider == 1 ? (1u << 15) : divider == 6 ? (1u << 16) : 0;
-    uint32_t ctrl = 0x80000000u | rate_bits | (rx_wide << 17) |
-                    (rx_flag << 16) | (rx_source << 20) | (rx_mode << 28) | n;
-    REG_WRITE(0x60033d5c, ctrl);
-    REG_WRITE(0x60033d5c, ctrl | (1u << 19));
-    REG_WRITE(0x60033d5c, ctrl);
+## 2. 片内 FFT 快照
 
-    while (!(REG_READ(0x60033d5c) & (1u << 18)) &&
-           esp_timer_get_time() - start < 20000) {}
-
-    bool done = (REG_READ(0x60033d5c) & (1u << 18)) != 0;
-    if (elapsed) *elapsed = esp_timer_get_time() - start;
-
-    REG_WRITE(0x60033d5c, 0);
-    REG_WRITE(SRAM_OWNER_REG, owner);
-    rx_filter_restore();
-
-    if (!done) return false;
-    for (unsigned j = 0; j < n; j++) {
-        if (IQ_BUFFER[j] == 0xa5a0055au) return false;
-    }
-    return true;
-}
-
-static bool capture(unsigned n, unsigned divider, unsigned format)
-{
-    unsigned elapsed;
-    if (!acquire_iq(n, divider, &elapsed)) {
-        reply("ERR capture_timeout\n");
-        return false;
-    }
-    return burst_send_capture(n, format, elapsed);
-}
-```
-
-## 2. 给 `spectrum_snapshot()` 提供 acquire 回调
-
-`main/common/spectrum.c` 里已有可移植的快照 FFT：
+`main/common/spectrum.c` 增加：
 
 ```c
-typedef bool (*spectrum_acquire_fn)(unsigned n, unsigned rate,
-                                    const uint32_t **words,
-                                    unsigned *elapsed_us);
 bool spectrum_snapshot(unsigned n, unsigned rate,
                        spectrum_acquire_fn acquire, uint8_t *bins);
 ```
 
-在 `receiver.c` 里加：
+流程：
 
-```c
-#include "spectrum.h"
+1. 调用 `acquire(n, rate, &words, &elapsed)`；
+2. 解包 IQ10，乘 Hann 窗；
+3. 调用片内 Q15 FFT；
+4. 去 DC；
+5. 输出自然频率顺序的 8-bit 相对功率，共 256 bin。
 
-static bool s3_spectrum_acquire(unsigned n, unsigned rate,
-                                const uint32_t **words,
-                                unsigned *elapsed_us)
-{
-    if (!acquire_iq(n, rate, elapsed_us)) return false;
-    *words = IQ_BUFFER;   /* IQ10 words */
-    return true;
-}
+S3 的采样率映射（`spectrum.c` 的 `rates[]`）：
+
+| rate code | 采样率 | UI span |
+|---|---|---|
+| 0 | 80 MS/s | 80 MHz |
+| 1 | 40 MS/s | 40 MHz |
+| 6 | 16 MS/s | 16 MHz |
+
+S3 使用 `MAX_FFT = 256`，只保留显示需要的分辨率，减少 BSS。
+
+## 3. 内存：RF ring 与 BSS 的冲突
+
+S3 的 RF ring 固定在：
+
+```
+RING_BANK_BASE = 0x3fcb0000
+RING_BANK_END  = 0x3fce0000
 ```
 
-### S3 采样率映射
+`sram_guard.ld` 要求 `_bss_end <= 0x3fcb0000`。直接把显示和 spectrum 编进来后，
+链接报错：
 
-`spectrum.c` 默认的 rate 表对 S3 不匹配。S3 的 divider 是：
-
-- 0 = 80 MS/s
-- 1 = 40 MS/s
-- 6 = 16 MS/s
-
-在 `spectrum.c` 的 `rates[]` 增加：
-
-```c
-#elif CONFIG_IDF_TARGET_ESP32S3
-    80000000, 40000000, 0, 0, 0, 0, 16000000
+```
+ld: S3 RF ring overlaps BSS
 ```
 
-然后：
+处理：
 
-```c
-uint8_t bins[256];
-spectrum_snapshot(256, 6, s3_spectrum_acquire, bins);  // 16 MS/s
-```
+- `ring_capture.c` 的 `txq`、`win2`、`fft_buf`、`bin_of` 在 S3 上改成堆分配；
+- 原有 twiddles 本来就在堆上；
+- `spectrum.c` 在 S3 上 `MAX_FFT=256`；
+- 最终 `_bss_end ≈ 0x3fca7380`，距离 ring 还有约 36KB 余量。
 
-## 3. 把 `spectrum.c` 编进 S3
+## 4. 显示：为什么不用 40KB 全屏帧缓冲
 
-上游 `main/CMakeLists.txt` 对 S3 排除了 `spectrum.c`：
+WiFi/PHY 启动后实测：
 
-```cmake
-if(NOT IDF_TARGET STREQUAL "esp32s3")
-    list(APPEND sources "common/spectrum.c")
-endif()
-```
+- DMA-capable 内部内存约 24KB；
+- 最大连续块约 15KB；
+- 40,960B 全屏 RGB565 帧缓冲分配失败，`abort()` 导致重启。
 
-改成 S3 也编译（或复制一份 `s3_spectrum.c`，避免影响其他 target）：
+因此 `st7735.c` 改成 **8 行条带渲染**：
 
-```cmake
-if(IDF_TARGET STREQUAL "esp32s3")
-    list(APPEND sources "common/spectrum.c")
-    list(APPEND dependencies esp_lcd esp_driver_spi esp_driver_gpio)
-    list(APPEND sources "targets/esp32s3/st7735.c")
-endif()
-```
+- 条带缓冲 `160 × 8 × 2 = 2,560B`；
+- 每帧 16 条，逐条 compose → `esp_lcd_panel_draw_bitmap()` → 等 DMA 完成；
+- 用 `on_color_trans_done` 回调和二值信号量复用同一条带；
+- 全屏刷新约 12ms（27MHz SPI），5fps 界面没有压力。
 
-依赖里加：
-
-```cmake
-idf_component_register(... REQUIRES ... esp_lcd esp_driver_spi esp_driver_gpio)
-```
-
-`main/idf_component.yml`：
-
-```yaml
-dependencies:
-  waveshare/esp_lcd_st7735: "^1.0.1"
-```
-
-## 4. ST7735 显示驱动
-
-阶段 1 的 `main/main.c` 已经有一份可跑通的 `esp_lcd` 初始化：
-
-- SPI2/FSPI：SCK12、MOSI11、CS10、DC9、RST8、BL7
-- 160x128，RGB565
-- `esp_lcd_panel_set_gap(panel, 0, 0)`
-- 横屏：`swap_xy=true`，`mirror=true,false`
-
-显示模块只需要：
+`st7735_draw_bins()` 的签名保持不变：
 
 ```c
 void st7735_draw_bins(const uint8_t *bins, unsigned n,
                       unsigned mhz, unsigned span_mhz,
-                      const char *footer);
+                      const char *status);
 ```
 
-- 256 bin 压到 160 列；
-- 上半屏画柱状频谱；
-- 下半屏画瀑布（每帧下移一行）；
-- 顶部/底部画频率、span、状态；
-- 只做相对强度，不标 dBm。
+## 5. UI 布局与配色
 
-## 5. 显示任务与 RF 互斥
+参考 S2 TFT Feather 的机载显示：
 
-`spectrum_snapshot()` 内部会调用 `acquire_iq()`，会和串口 `CAP`/`SPEC` 命令抢射频。
-加一个互斥锁：
-
-```c
-static SemaphoreHandle_t rf_lock;
-
-/* 串口 capture / ring 命令也拿这把锁 */
-xSemaphoreTake(rf_lock, portMAX_DELAY);
-... acquire_iq / spectrum_snapshot ...
-xSemaphoreGive(rf_lock);
+```
+y=0..17    大号中心频率 + MHz + SPAN
+y=19..24   操作提示 / PAUSED
+y=27..92   实心频谱 + 亮边 + 3 条竖向刻度
+y=93       基线
+y=94..98   左/中/右频率刻度
+y=100..127 28 行瀑布
 ```
 
-显示任务（建议 pin 到 core 0）：
+配色：
 
-```c
-static void lcd_task(void *arg)
-{
-    uint8_t bins[256];
-    for (;;) {
-        if (xSemaphoreTake(rf_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
-            if (spectrum_snapshot(256, 6, s3_spectrum_acquire, bins)) {
-                st7735_draw_bins(bins, 256, frequency_mhz, 16, "ESP-SDR");
-            }
-            xSemaphoreGive(rf_lock);
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));  // 5 fps
-    }
-}
-```
+- 背景：近黑 `#0A0E14`
+- 文字：暖白 `#E8F6F3`
+- 强调：薄荷青 `#4FE3D0`
+- 频谱填充：深青 `#0B5E57`，顶边 `#5FFFE8`
+- 瀑布：magma 色带（黑紫 → 品红 → 橙 → 淡黄）
 
-- 20ms 超时避免串口大传输时显示任务卡死；
-- 显示刷新 5 fps 足够；
-- 串口主机占用射频时，显示可以暂停/显示 `BUSY`。
+大号频率使用 8x8 像素字体（public domain，font8x8 / VGA 派生），
+小字继续用 3x5 字体。
 
 ## 6. 按键与调谐
 
-- K1：中心频率 +5 MHz
-- K2：中心频率 -5 MHz
-- K3：span / 模式（16 / 40 / 80 MHz，步进）
-- K4：自动扫描 / 返回
+`lcd_task()` pin 在 core 0，周期性执行：
 
-调谐必须和采集在同一把锁里：
+- **K1/K2**：中心频率 ±5 MHz，限制在 `RX_FREQ_MIN..RX_FREQ_MAX`；
+- **K3**：span 16 → 40 → 80 MHz 循环；
+- **K4**：暂停/继续；暂停时保留最后一帧并显示 `PAUSED  K4 RESUME`；
+- 未暂停时每 200ms 取一次 `spectrum_snapshot(256, rate_code, ...)`。
+
+调谐和采集都在 `s_iq_lock` 内：
 
 ```c
 frequency_mhz = new_mhz;
 rx_ready = false;
-prepare_rx();   // 下一次 acquire_iq 会重新 tune
+prepare_rx();     /* 下一次 acquire_iq 重新 tune */
 ```
 
-频率范围受 PLL 限制：S3 主要可用在 2.4GHz 附近，向下约 1.85GHz；
-不是 100–6000 MHz 全段都能锁。
+注意：固件允许输入 100–6000 MHz，但 S3 的 WiFi PLL 实际主要覆盖
+**约 1.85–2.5GHz**；超出这个范围可能没有信号或失锁。spans/频率显示的是
+请求值，不代表芯片一定锁得住。
 
-## 7. 内存/时序预算
+## 7. IDF 5.4 兼容
 
-- 帧缓冲：160×128×2 = 40,960 B（内部 RAM，不用 PSRAM）
-- `spectrum.c` 静态 FFT/窗/功率/帧缓冲约 20KB
-- RF 采集 aperture 单独保留（S3 `SOC_RESERVE_MEMORY_REGION`）
-- 256 点 FFT + 160 列绘图在 S3 上很轻；主要成本是 SPI 刷屏
-- 27MHz SPI，全屏 40KB 约 12ms；5 fps 没问题
-- 不要每帧 `malloc/free`；帧缓冲和 bins 都静态/一次性分配
+上游使用较新的 IDF API：
 
-## 8. 验证顺序
+```c
+cpu_utility_ll_enable_clock_and_reset_app_cpu();
+```
 
-1. 只跑阶段 1：屏幕颜色条、方向、偏移、按键；
-2. 接入 `acquire_iq`，串口打印 IQ 非 0、无 timeout；
-3. 跑 `spectrum_snapshot`，串口打印 256 bin 的最大/最小；
-4. 屏幕画静态 bin；
-5. 接实时采集，5 fps；
-6. 加调谐/按键/瀑布；
-7. 对比电脑版 ESP-SDR viewer，确认频率和相对强度趋势一致。
+IDF 5.4.2 没有这个合并函数，`ring_capture.c` 加了 shim：
 
-## 9. 已知坑
+```c
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 0)
+static inline void cpu_utility_ll_enable_clock_and_reset_app_cpu(void)
+{
+    cpu_utility_ll_reset_cpu(1);
+}
+#endif
+```
 
-- ST7735 的 offset/rotation 因面板批次不同，必须实测；
-- S3 无 PSRAM，别照搬 S2 Feather 的 PSRAM 帧缓冲；
-- `spectrum.c` 的 rate 表必须改，否则 16 MS/s 会被当成 4 MS/s；
-- `capture()` 原函数会发送数据，显示路径必须走 `acquire_iq()`，不要重复发送；
-- 显示任务和串口命令必须互斥，否则 RF 状态会乱；
+## 8. 并发限制
+
+- 显示任务和串口 `CAP` / `SPEC` / `IQS` 都会操作同一套 RF 寄存器；
+- 显示路径拿了 `s_iq_lock`，但上游串口 `capture()` / `ring_capture_run()`
+  仍然直接操作射频；
+- **不要同时用电脑串口抓 IQ 和让屏幕刷新**；独立手持使用没问题。
+
+如果以后要支持“边看屏幕边推流”，需要把串口路径也纳入同一把锁，
+并接受刷屏期间主机传输被阻塞。
+
+## 9. 构建与验证
+
+```bash
+cd firmware
+idf.py -B build-s3 -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG=build-s3/sdkconfig \
+  -DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3 build
+idf.py -B build-s3 -p /dev/cu.usbserial-XXXX flash
+```
+
+实机验证项：
+
+1. 屏幕无偏移/变形；
+2. 频谱连续刷新（约 5fps），瀑布向下滚动；
+3. K1/K2 以 5MHz 改变中心频率；
+4. K3 在 16/40/80 MHz 间切换，刻度随之变化；
+5. K4 暂停后画面保持，再按恢复；
+6. 连续运行无重启/panic。
+
+## 10. 已知坑
+
+- ST7735 的 offset/rotation 因面板批次不同，必须实测；本机 `set_gap(0,0)`；
+- S3 无 PSRAM，不能照搬 S2 Feather 的 40KB 帧缓冲；
+- `spectrum.c` 的 `rates[]` 必须包含 S3，否则 16 MS/s 会被当成 4 MS/s；
+- 显示路径不要调用 `capture()`，否则会重复向主机发送数据；
+- 不要把大数组放回 BSS，否则会再次触发 RF ring 重叠；
 - 跑 SDR 时不能同时跑 RID 扫描；
 - 未公开的 raw I/Q 机制可能随 IDF/芯片版本变化，升级后要重新验证。
 
 ## 参考
 
-- ESP-SDR：https://github.com/ESPARGOS/esp-sdr
-- issue #7（板载显示）：https://github.com/ESPARGOS/esp-sdr/issues/7
-- S2 TFT Feather 显示 fork：https://github.com/Kelsidavis/esp-sdr-s2-range
-- `esp_lcd_st7735`：https://components.espressif.com/components/waveshare/esp_lcd_st7735
+- ESP-SDR：<https://github.com/ESPARGOS/esp-sdr>
+- issue #7（板载显示）：<https://github.com/ESPARGOS/esp-sdr/issues/7>
+- S2 TFT Feather 显示 fork：<https://github.com/Kelsidavis/esp-sdr-s2-range>
+- `esp_lcd_st7735`：<https://components.espressif.com/components/waveshare/esp_lcd_st7735>
+- font8x8：<https://github.com/dhepper/font8x8>
