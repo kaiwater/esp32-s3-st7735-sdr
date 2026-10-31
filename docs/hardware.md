@@ -23,7 +23,8 @@
 - 屏幕的 `SDA` 是 SPI MOSI，不是 I2C。
 - VCC 用 3.3V，不要接 5V。
 - BLK 可以接 GPIO7 做开关/PWM；先验证时也可以直接接 3V3。
-- 本机面板在 160x128 横屏下需要偏移 `x=4, y=0`。
+- 本机在 ESP-IDF `esp_lcd` 下 `set_gap(0, 0)` 即可，实测无偏移/变形。
+  （RID 扫描器用 LovyanGFX 时是 `(4,0)`，两者驱动不同，不要混用。）
 - 如果换屏后图像偏移/裁切，优先调 `set_gap` 和 rotation/mirror。
 
 ## 按键
@@ -60,7 +61,8 @@ UART0 GPIO43/44、原生 USB GPIO19/20 不冲突。
 
 - `esp_lcd_panel_swap_xy(panel, true)`
 - `esp_lcd_panel_mirror(panel, true, false)`
-- `esp_lcd_panel_set_gap(panel, 4, 0)`
+- `esp_lcd_panel_set_gap(panel, 0, 0)`
 
-如果方向不对，调整 `swap_xy` / `mirror` 的组合；如果图像有 1~2 像素偏移，
-调 `set_gap`。
+实测这一块屏在 ESP-IDF `esp_lcd` 下用 `(0,0)` 就完全对齐。
+如果换屏后方向不对，调整 `swap_xy` / `mirror` 的组合；如果有 1~2 像素偏移，
+再调 `set_gap`。

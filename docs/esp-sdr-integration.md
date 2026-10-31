@@ -163,7 +163,7 @@ dependencies:
 
 - SPI2/FSPI：SCK12、MOSI11、CS10、DC9、RST8、BL7
 - 160x128，RGB565
-- `esp_lcd_panel_set_gap(panel, 4, 0)`
+- `esp_lcd_panel_set_gap(panel, 0, 0)`
 - 横屏：`swap_xy=true`，`mirror=true,false`
 
 显示模块只需要：

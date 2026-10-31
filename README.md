@@ -10,7 +10,7 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 1 | ST7735 160x128 + 4 按键 bring-up | 编译通过（ESP-IDF 5.4.2），待实机验证 |
+| 1 | ST7735 160x128 + 4 按键 bring-up | 已实机验证：屏幕无偏移/变形，K1~K4 全部正常 |
 | 2 | ESP-SDR S3 接入（raw IQ / FFT） | 设计完成，待实现 |
 | 3 | 频谱 + 瀑布 + 调谐 UI | 待实现 |
 | 4 | 电池/外壳/长期稳定性 | 未开始 |
@@ -62,7 +62,7 @@ ST7735 上，不需要电脑。
 | 公共端 | GND | J1-22 |
 
 - 屏幕的 `SDA` 是 SPI MOSI，不是 I2C。
-- 本机面板偏移：`x=4, y=0`；换屏后可能要调整。
+- 本机在 ESP-IDF `esp_lcd` 下使用 `set_gap(0, 0)`；不要套用 LovyanGFX 的 `(4,0)`。
 - 按键一端接 GPIO、一端接 GND，内部上拉。
 - 详细说明见 [`docs/hardware.md`](docs/hardware.md)。
 
@@ -96,7 +96,8 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 阶段 1 的显示 demo 在 `main/`，使用 Espressif Component Registry 的
 `waveshare/esp_lcd_st7735`。首次构建会自动拉取组件。
 
-已在 **ESP-IDF v5.4.2 / esp32s3** 上编译通过（2026-10-31），但还没在硬件上跑屏。
+已在 **ESP-IDF v5.4.2 / esp32s3** 上编译并实机验证（2026-10-31）：
+160x128 显示正常，无偏移/变形，K1~K4 全部可用。
 
 完整 SDR 接入步骤见 [`docs/esp-sdr-integration.md`](docs/esp-sdr-integration.md)。
 
