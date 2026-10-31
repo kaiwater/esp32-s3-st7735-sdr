@@ -69,6 +69,10 @@ bin n/2 是 Nyquist，后半段是负频率。`st7735_draw_bins()` 在映射到�
 之前先做 `(j + n/2) % n` 旋转，让 DC 落在屏幕中心；否则宽 span 会把
 Nyquist 的凹陷画在正中间。
 
+DC/LO 泄漏也在 `spectrum_snapshot()` 里处理：先算 I/Q 的均值并在**时域**
+减掉，再加 Hann 窗做 FFT。只在 FFT 后减 bin 0 不够，因为 Hann 窗会把
+DC 泄漏到相邻 bin，宽 span 下表现为中间一大块凸起。
+
 ## 3. 内存：RF ring 与 BSS 的冲突
 
 S3 的 RF ring 固定在：
@@ -155,10 +159,14 @@ WiFi/PHY 启动时 3.3V 会有电流冲击。如果屏幕已经初始化，会�
 
 `lcd_task()` pin 在 core 0，周期性执行：
 
-- **K1/K2**：中心频率 ±5 MHz，限制在 `RX_FREQ_MIN..RX_FREQ_MAX`；
-- **K3**：span 16 → 40 → 80 MHz 循环；
-- **K4**：暂停/继续；暂停时保留最后一帧并显示 `PAUSED  K4 RESUME`；
-- 未暂停时每 200ms 取一次 `spectrum_snapshot(256, rate_code, ...)`。
+- **K1/K2 短按**：中心频率 ±5 MHz；
+- **K1/K2 长按**：进入重复调谐，按 5 → 10 → 25 → 50 → 100 MHz 加速；
+- **K3 短按**：span 16 → 40 → 80 MHz 循环；
+- **K3 长按**：在 2500 MHz（最高）和 1850 MHz（最低）之间跳转；
+- **K4 短按**：暂停/继续；暂停时保留最后一帧并显示 `PAUSED  K4 RESUME`；
+- **K4 长按**：回到初始频率 2412 MHz 并恢复刷新；
+- 未暂停时每 200ms 取一次 `spectrum_snapshot(256, rate_code, ...)`；
+- 按键任务改为 20ms 轮询，显示仍按 200ms 节流，长按阈值 700ms。
 
 调谐和采集都在 `s_iq_lock` 内：
 

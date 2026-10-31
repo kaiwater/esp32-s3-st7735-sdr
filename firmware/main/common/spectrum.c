@@ -173,14 +173,23 @@ bool spectrum_snapshot(unsigned n, unsigned rate, spectrum_acquire_fn acquire, u
     const uint32_t *words;
     unsigned elapsed;
     if (!acquire(n, rate, &words, &elapsed)) return false;
+    /* Remove the DC/LO offset before windowing.  Doing it after the FFT only
+     * fixes bin 0; the Hann window smears the offset into bins 1..4, which
+     * shows up as a broad bump in the middle of a wide span. */
+    int32_t mean_i = 0, mean_q = 0;
     for (unsigned j = 0; j < n; j++) {
-        int32_t i = ((int32_t)(words[j] << 22) >> 22), q = ((int32_t)(words[j] << 12) >> 22);
+        mean_i += ((int32_t)(words[j] << 22) >> 22);
+        mean_q += ((int32_t)(words[j] << 12) >> 22);
+    }
+    mean_i /= (int32_t)n;
+    mean_q /= (int32_t)n;
+    for (unsigned j = 0; j < n; j++) {
+        int32_t i = ((int32_t)(words[j] << 22) >> 22) - mean_i;
+        int32_t q = ((int32_t)(words[j] << 12) >> 22) - mean_q;
         fft_data[2 * j] = clamp16((i * window[j]) >> 9);
         fft_data[2 * j + 1] = clamp16((q * window[j]) >> 9);
     }
     spectrum_fft_poll(fft_data, n, dsps_fft_w_table_sc16, snapshot_poll, NULL);
-    spectrum_dc_t dc = {0};
-    spectrum_dc_apply(&dc, fft_data, n);
     for (unsigned j = 0, bin = 0; j < n; j++) {
         bins[bin] = spectrum_power_code(spectrum_complex_power(fft_data[2 * j], fft_data[2 * j + 1]));
         unsigned bit = n >> 1;

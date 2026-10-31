@@ -31,10 +31,10 @@
 
 | 按键 | 功能 | ESP32-S3 | J1 脚位 |
 |---|---|---|---|
-| K1 | UP / 频率 + | GPIO4 | J1-4 |
-| K2 | DOWN / 频率 - | GPIO5 | J1-5 |
-| K3 | OK / span 切换 | GPIO6 | J1-6 |
-| K4 | BACK / 暂停 | GPIO14 | J1-20 |
+| K1 | UP / 频率 +（长按加速） | GPIO4 | J1-4 |
+| K2 | DOWN / 频率 -（长按加速） | GPIO5 | J1-5 |
+| K3 | OK / span（长按跳最高/最低） | GPIO6 | J1-6 |
+| K4 | BACK / 暂停（长按回 2412） | GPIO14 | J1-20 |
 | 公共端 | GND | GND | J1-22 |
 
 按键一端接 GPIO，一端接 GND；GPIO 开内部上拉，按下为低。

@@ -451,12 +451,19 @@ void st7735_draw_bins(const uint8_t *bins, unsigned n,
     }
 }
 
+/* Events: 1..4 short press, 11..14 long press (once), 21/22 repeat
+ * while K1/K2 stay held.  Long press threshold is 700 ms. */
+#define BTN_LONG_MS   700
+#define BTN_REPEAT_MS 120
+
 int st7735_button(void)
 {
     static uint8_t stable;
     static uint32_t last;
     static uint32_t down_at[4];
+    static uint32_t next_repeat[4];
     static bool was_down[4];
+    static bool long_sent[4];
 
     uint8_t raw = 0;
     if (gpio_get_level(PIN_BTN_UP) == 0) raw |= 1;
@@ -465,18 +472,32 @@ int st7735_button(void)
     if (gpio_get_level(PIN_BTN_BACK) == 0) raw |= 8;
 
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    if (now - last < 25) return 0;
+    if (now - last < 10) return 0;
     last = now;
     stable = raw;
 
     for (int i = 0; i < 4; i++) {
         bool down = (stable >> i) & 1;
-        if (down && !was_down[i]) down_at[i] = now;
+        if (down && !was_down[i]) {
+            down_at[i] = now;
+            long_sent[i] = false;
+            was_down[i] = true;
+            continue;
+        }
+        if (down && !long_sent[i] && now - down_at[i] >= BTN_LONG_MS) {
+            long_sent[i] = true;
+            next_repeat[i] = now + BTN_REPEAT_MS;
+            return 11 + i;
+        }
+        if (down && long_sent[i] && now >= next_repeat[i]) {
+            next_repeat[i] = now + BTN_REPEAT_MS;
+            return 21 + i;
+        }
         if (!down && was_down[i]) {
             was_down[i] = false;
-            if (now - down_at[i] >= 30) return i + 1;
+            if (!long_sent[i] && now - down_at[i] >= 30) return i + 1;
+            long_sent[i] = false;
         }
-        was_down[i] = down;
     }
     return 0;
 }

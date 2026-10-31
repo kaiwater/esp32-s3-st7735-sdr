@@ -267,36 +267,88 @@ static bool s3_spectrum_acquire(unsigned n, unsigned rate,
 }
 
 #define UI_HINT "K1/2 TUNE  K3 SPAN  K4 HOLD"
+#define DEFAULT_FREQ_MHZ 2412u
+/* Practical S3 tuning range; outside this the WiFi PLL often fails. */
+#define UI_FREQ_MIN 1850u
+#define UI_FREQ_MAX 2500u
+
+static void apply_frequency(unsigned mhz)
+{
+    frequency_mhz = mhz;
+    rx_ready = false;
+    prepare_rx();
+}
+
+static void tune_by(int delta)
+{
+    int mhz = (int)frequency_mhz + delta;
+    if (mhz < (int)UI_FREQ_MIN) mhz = (int)UI_FREQ_MIN;
+    if (mhz > (int)UI_FREQ_MAX) mhz = (int)UI_FREQ_MAX;
+    xSemaphoreTake(s_iq_lock, portMAX_DELAY);
+    apply_frequency((unsigned)mhz);
+    xSemaphoreGive(s_iq_lock);
+}
+
+/* Long-press acceleration: 5 MHz, then 10/25/50/100 MHz. */
+static unsigned accel_step(unsigned n)
+{
+    if (n < 5) return 5;
+    if (n < 10) return 10;
+    if (n < 15) return 25;
+    if (n < 20) return 50;
+    return 100;
+}
 
 static void lcd_task(void *arg)
 {
     (void)arg;
     uint8_t bins[256], shown[256];
     unsigned rate_code = 6;   /* 0=80, 1=40, 6=16 MS/s */
+    unsigned rep1 = 0, rep2 = 0;
     bool paused = false, have_frame = false;
+    int64_t next_frame = 0;
 
     for (;;) {
         int b = st7735_button();
-        bool changed = false;
-        if (b == 1 || b == 2) {
-            xSemaphoreTake(s_iq_lock, portMAX_DELAY);
-            int mhz = (int)frequency_mhz + (b == 1 ? 5 : -5);
-            if (mhz < RX_FREQ_MIN) mhz = RX_FREQ_MIN;
-            if (mhz > RX_FREQ_MAX) mhz = RX_FREQ_MAX;
-            frequency_mhz = (unsigned)mhz;
-            rx_ready = false;
-            prepare_rx();
-            xSemaphoreGive(s_iq_lock);
-            changed = true;
-        } else if (b == 3) {
+        bool changed = false, refresh = false;
+
+        switch (b) {
+        case 1:  rep1 = 0; tune_by(+5); changed = true; break;
+        case 2:  rep2 = 0; tune_by(-5); changed = true; break;
+        case 11: rep1 = 0; tune_by(+5); changed = true; break;   /* long K1 */
+        case 12: rep2 = 0; tune_by(-5); changed = true; break;   /* long K2 */
+        case 21: rep1++; tune_by(+(int)accel_step(rep1)); changed = true; break;
+        case 22: rep2++; tune_by(-(int)accel_step(rep2)); changed = true; break;
+        case 3:
             rate_code = rate_code == 6 ? 1 : rate_code == 1 ? 0 : 6;
             changed = true;
-        } else if (b == 4) {
+            break;
+        case 13:                                                   /* long K3 */
+            xSemaphoreTake(s_iq_lock, portMAX_DELAY);
+            /* From anywhere in the band, jump to the top first, then the
+             * bottom, then back to the top. */
+            apply_frequency(frequency_mhz >= UI_FREQ_MAX ? UI_FREQ_MIN : UI_FREQ_MAX);
+            xSemaphoreGive(s_iq_lock);
+            changed = refresh = true;
+            break;
+        case 4:
             paused = !paused;
-            changed = true;
+            changed = refresh = true;
+            break;
+        case 14:                                                   /* long K4 */
+            xSemaphoreTake(s_iq_lock, portMAX_DELAY);
+            apply_frequency(DEFAULT_FREQ_MHZ);
+            xSemaphoreGive(s_iq_lock);
+            paused = false;
+            changed = refresh = true;
+            break;
+        default:
+            break;
         }
 
         unsigned span = rate_code == 6 ? 16 : rate_code == 1 ? 40 : 80;
+        int64_t now = esp_timer_get_time();
+        if (refresh) next_frame = 0;
 
         if (paused) {
             if (changed) {
@@ -304,7 +356,8 @@ static void lcd_task(void *arg)
                 st7735_draw_bins(have_frame ? shown : zero, 256,
                                  frequency_mhz, span, "PAUSED  K4 RESUME");
             }
-        } else {
+        } else if (now >= next_frame) {
+            next_frame = now + 200000;
             bool ok = spectrum_snapshot(256, rate_code, s3_spectrum_acquire, bins);
             if (ok) {
                 memcpy(shown, bins, sizeof(shown));
@@ -316,7 +369,7 @@ static void lcd_task(void *arg)
                 st7735_draw_bins(zero, 256, frequency_mhz, span, "ACQ FAIL");
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
