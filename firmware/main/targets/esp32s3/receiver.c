@@ -267,6 +267,7 @@ static bool s3_spectrum_acquire(unsigned n, unsigned rate,
 }
 
 #define UI_HINT "K1/2 TUNE  K3 SPAN  K4 HOLD"
+#define UI_FRAME_US 50000   /* 20 fps cap */
 #define DEFAULT_FREQ_MHZ 2412u
 /* Practical S3 tuning range; outside this the WiFi PLL often fails. */
 #define UI_FREQ_MIN 1850u
@@ -368,7 +369,7 @@ static void lcd_task(void *arg)
                                  frequency_mhz, span, "PAUSED  K4 RESUME");
             }
         } else if (now >= next_frame) {
-            next_frame = now + 200000;
+            next_frame = now + UI_FRAME_US;
             bool ok = spectrum_snapshot(256, rate_code, s3_spectrum_acquire, bins);
             if (ok) {
                 memcpy(shown, bins, sizeof(shown));

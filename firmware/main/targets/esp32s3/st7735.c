@@ -382,9 +382,11 @@ void st7735_draw_bins(const uint8_t *bins, unsigned n,
             if (code > v) v = code;
         }
         vcol[x] = (uint8_t)v;
-        s_wf[WF_ROWS - 1][x] = (uint8_t)v;
     }
-    memmove(&s_wf[0][0], &s_wf[1][0], (WF_ROWS - 1) * WIDTH);
+    /* Conventional SDR waterfall: the newest row sits just under the
+     * spectrum and older rows scroll downwards. */
+    memmove(&s_wf[1][0], &s_wf[0][0], (WF_ROWS - 1) * WIDTH);
+    for (int x = 0; x < WIDTH; x++) s_wf[0][x] = vcol[x];
 
     char freq[12], span[16], left[12], right[12];
     snprintf(freq, sizeof(freq), "%u", mhz);
